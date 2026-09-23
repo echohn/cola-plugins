@@ -5,6 +5,7 @@ import type { DingTalkClient } from "../api/client.js";
 import { parseRobotMessage } from "./message.js";
 import type { ParsedRobotMessage } from "./message.js";
 import { MessageDedup } from "./dedup.js";
+import { downloadRobotMessageMedia } from "./media-download.js";
 
 /** Reply sent to a group @mention while group chat is disabled. */
 export const GROUP_DISABLED_NOTICE = pluginMessage(
@@ -101,6 +102,19 @@ export async function handleRobotMessage(
     return;
   }
 
+  // Media messages carry a downloadCode; exchange it for a temp URL, download
+  // to a local path, and hand the path to the agent as an attachment. When the
+  // download succeeds the text is still the short summary (the file itself is
+  // the payload); failures keep the summary only.
+  let attachment: string | undefined;
+  if (parsed.media?.downloadCode) {
+    if (!parsed.robotCode) {
+      logger.warn(`dingtalk[${accountId}]: media message without robotCode, cannot download`);
+    } else {
+      attachment = await downloadRobotMessageMedia(deps.client, parsed, logger);
+    }
+  }
+
   await deliver({
     sessionId: parsed.isGroup
       ? ["conversation", accountId, parsed.conversationId]
@@ -116,6 +130,7 @@ export async function handleRobotMessage(
       messageId: parsed.msgId,
     },
     message: messageToDeliver,
+    ...(attachment ? { attachments: [attachment] } : {}),
   });
 }
 

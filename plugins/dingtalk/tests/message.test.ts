@@ -4,8 +4,13 @@ import {
   parseRobotMessage,
   stripMentionPrefix,
   summarizeMediaMessage,
+  extractMedia,
 } from "../src/gateway/message.js";
 import { MessageDedup } from "../src/gateway/dedup.js";
+import {
+  downloadRobotMessageMedia,
+  MAX_MEDIA_DOWNLOAD_BYTES,
+} from "../src/gateway/media-download.js";
 
 const logger = { warn: vi.fn(), info: vi.fn(), error: vi.fn() } as never;
 
@@ -136,6 +141,120 @@ describe("summarizeMediaMessage", () => {
 
   it("falls back to the raw msgtype for unknown types", () => {
     expect(summarizeMediaMessage({ ...base, msgtype: "hologram" })).toBe("[hologram]");
+  });
+});
+
+describe("extractMedia", () => {
+  it("extracts downloadCode + fileName from a file message content", () => {
+    const media = extractMedia({
+      msgtype: "file",
+      content: { downloadCode: "dc-1", fileName: "report.pdf" },
+    });
+    expect(media).toEqual({ kind: "file", downloadCode: "dc-1", fileName: "report.pdf" });
+  });
+
+  it("normalizes picture msgtype to an image kind", () => {
+    const media = extractMedia({
+      msgtype: "picture",
+      content: { downloadCode: "dc-img" },
+    });
+    expect(media?.kind).toBe("image");
+    expect(media?.fileName).toBe("dc-img");
+  });
+
+  it("falls back to the top-level fileName / downloadCode when content lacks them", () => {
+    const media = extractMedia({
+      msgtype: "file",
+      fileName: "note.txt",
+    });
+    expect(media?.fileName).toBe("note.txt");
+  });
+
+  it("normalizes audio to a voice and video to a video kind", () => {
+    expect(extractMedia({ msgtype: "audio", content: { downloadCode: "a" } })?.kind).toBe("audio");
+    expect(extractMedia({ msgtype: "video", content: { downloadCode: "v" } })?.kind).toBe("video");
+  });
+
+  it("returns undefined for text and richText messages", () => {
+    expect(extractMedia({ msgtype: "text", text: { content: "hi" } })).toBeUndefined();
+    expect(extractMedia({ msgtype: "richText" })).toBeUndefined();
+  });
+});
+
+describe("downloadRobotMessageMedia", () => {
+  it("downloads the message and returns the temp path", async () => {
+    const downloaded = "/tmp/cola-dingtalk-abc/report.pdf";
+    const client = {
+      downloadMessageFile: vi.fn(async () => downloaded),
+    };
+    const parsed = {
+      robotCode: "robot-1",
+      media: { kind: "file", downloadCode: "dc", fileName: "report.pdf" },
+    } as never;
+    const info = vi.fn();
+
+    const out = await downloadRobotMessageMedia(client as never, parsed, {
+      info,
+      warn: vi.fn(),
+    } as never);
+
+    expect(out).toBe(downloaded);
+    expect(client.downloadMessageFile).toHaveBeenCalledWith("robot-1", "dc", "report.pdf", {
+      maxBytes: MAX_MEDIA_DOWNLOAD_BYTES,
+    });
+    expect(info).toHaveBeenCalled();
+  });
+
+  it("returns a default extension-based name when the message has no file name", async () => {
+    const client = { downloadMessageFile: vi.fn(async () => "/tmp/x") };
+    const parsed = {
+      robotCode: "robot-1",
+      media: { kind: "image", downloadCode: "dc" },
+    } as never;
+
+    await downloadRobotMessageMedia(client as never, parsed, {
+      info: vi.fn(),
+      warn: vi.fn(),
+    } as never);
+
+    expect(client.downloadMessageFile).toHaveBeenCalledWith("robot-1", "dc", "picture.jpg", {
+      maxBytes: MAX_MEDIA_DOWNLOAD_BYTES,
+    });
+  });
+
+  it("returns undefined when downloadCode or robotCode is missing, without downloading", async () => {
+    const client = { downloadMessageFile: vi.fn() };
+    const info = vi.fn();
+    const warn = vi.fn();
+
+    const out = await downloadRobotMessageMedia(
+      client as never,
+      { media: { kind: "file", downloadCode: "dc" } } as never,
+      { info, warn } as never,
+    );
+
+    expect(out).toBeUndefined();
+    expect(client.downloadMessageFile).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalled();
+  });
+
+  it("returns undefined and logs a warning when the download fails", async () => {
+    const client = {
+      downloadMessageFile: vi.fn(async () => {
+        throw new Error("download failed");
+      }),
+    };
+    const info = vi.fn();
+    const warn = vi.fn();
+
+    const out = await downloadRobotMessageMedia(
+      client as never,
+      { robotCode: "r", media: { kind: "file", downloadCode: "dc" } } as never,
+      { info, warn } as never,
+    );
+
+    expect(out).toBeUndefined();
+    expect(warn).toHaveBeenCalled();
   });
 });
 

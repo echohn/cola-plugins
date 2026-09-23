@@ -9,7 +9,7 @@ import type {
 import type { DingTalkPluginConfig } from "./api/types.js";
 import { parseAccountConfigs } from "./auth/accounts.js";
 import { startMonitor, type MonitorHandle } from "./gateway/monitor.js";
-import { sendText } from "./outbound/send.js";
+import { sendText, sendMedia } from "./outbound/send.js";
 import { createDingTalkCommands } from "./commands/dingtalk.js";
 import { clearClientCache } from "./api/client.js";
 
@@ -75,10 +75,22 @@ export default defineChannel<DingTalkGatewayState>({
   capabilities: {
     receive: {
       text: true,
+      // Media download is implemented in the gateway (gateway/media-download.ts);
+      // every inbound media type that DingTalk delivers to the robot is accepted.
+      image: true,
+      voice: true,
+      video: true,
+      file: true,
     },
     send: {
       text: true,
       markdown: true,
+      // Outbound media: the host uploads via sendMedia (outbound/send.ts). Video
+      // is intentionally NOT advertised: DingTalk's sampleVideo needs a separate
+      // cover-image mediaId that cannot be derived from the single file the host
+      // hands us, so enabling it would fail at send time.
+      image: true,
+      file: true,
     },
     limits: {
       // DingTalk caps robot msgParam at 15000 UTF-8 bytes. CJK text costs up
@@ -226,6 +238,14 @@ export default defineChannel<DingTalkGatewayState>({
   },
 
   outbound: {
+    mediaCapabilities: {
+      // DingTalk caps media upload at 20MB (image/video/file; voice ≤ 2MB).
+      // The host enforces this before calling sendMedia so an oversized file
+      // fails client-side rather than at the API.
+      maxBytesPerFile: 20 * 1024 * 1024,
+      supportedKinds: ["image", "file"],
+    },
+
     async sendText(ctx: OutboundContext) {
       const handle = resolveMonitorForDelivery(ctx.deliveryContext);
       if (!handle) {
@@ -236,6 +256,22 @@ export default defineChannel<DingTalkGatewayState>({
         handle.restClient,
         ctx.deliveryContext.to,
         ctx.text,
+        handle.getRobotCode(),
+        ctx.logger,
+      );
+    },
+
+    async sendMedia(ctx: OutboundContext & { mediaType: string; filePath: string }) {
+      const handle = resolveMonitorForDelivery(ctx.deliveryContext);
+      if (!handle) {
+        ctx.logger.error("sendMedia: no active DingTalk account");
+        return;
+      }
+      await sendMedia(
+        handle.restClient,
+        ctx.deliveryContext.to,
+        ctx.mediaType,
+        ctx.filePath,
         handle.getRobotCode(),
         ctx.logger,
       );

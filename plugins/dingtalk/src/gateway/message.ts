@@ -31,6 +31,17 @@ export type ParsedRobotMessage = {
   senderId?: string;
   senderNick?: string;
   robotCode?: string;
+  /**
+   * Present for inbound media messages (file/picture/audio/video) that carry a
+   * downloadCode and a file name. The gateway exchanges the downloadCode for a
+   * temporary URL via /v1.0/robot/messageFiles/download, then downloads to a
+   * local temp path so it can be handed to the agent as an attachment.
+   */
+  media?: {
+    kind: "image" | "audio" | "video" | "file" | "unknown";
+    downloadCode?: string;
+    fileName?: string;
+  };
 };
 
 export const GROUP_MENTION_PREFIX = "@机器人";
@@ -80,7 +91,62 @@ export function parseRobotMessage(
     senderId: payload.senderId,
     senderNick: payload.senderNick,
     robotCode: payload.robotCode,
+    media: extractMedia(payload),
   };
+}
+
+/**
+ * Pull the downloadCode + file name (and a normalized media kind) out of a
+ * non-text inbound payload. DingTalk nests these under `content` for several
+ * types (file, picture, audio, video) and also at the top level for some.
+ * Rich-text (`richText`) messages never carry a single downloadCode (they can
+ * embed multiple pictures), so they yield `undefined` here and stay as a text
+ * summary.
+ */
+export function extractMedia(
+  payload: DingTalkRobotPayload,
+): ParsedRobotMessage["media"] | undefined {
+  if (payload.msgtype === "text" || payload.msgtype === "richText") return undefined;
+
+  const content = (payload.content ?? {}) as {
+    downloadCode?: string;
+    fileName?: string;
+  };
+
+  const downloadCode = content.downloadCode ?? (payload as { downloadCode?: string }).downloadCode;
+  const fileName =
+    content.fileName ??
+    (payload as { fileName?: string }).fileName ??
+    downloadCode?.replace(/^\*+/, "");
+
+  const kind = mediaKindForMsgType(payload.msgtype);
+  return { kind, downloadCode, fileName: normalizeFileName(fileName) };
+}
+
+function mediaKindForMsgType(
+  msgtype: string | undefined,
+): NonNullable<ParsedRobotMessage["media"]>["kind"] {
+  switch (msgtype) {
+    case "picture":
+      return "image";
+    case "audio":
+      return "audio";
+    case "video":
+      return "video";
+    case "file":
+      return "file";
+    default:
+      return "unknown";
+  }
+}
+
+/** Normalize an inbound file name so the temp download path stays meaningful. */
+function normalizeFileName(name: string | undefined): string | undefined {
+  if (!name || !name.trim()) return undefined;
+  const trimmed = name.trim();
+  // DingTalk returns some media download names as a bare id with no extension;
+  // keep whatever we have — sanitization happens at write time.
+  return trimmed;
 }
 
 /**
