@@ -52,6 +52,22 @@ export type ConnectionStateInput = {
  * (see QwenLM/qwen-code#6715 for the same finding). `registered` is still
  * surfaced via getStatus details when we happen to receive it.
  */
+/**
+ * How often the watchdog timer samples the last-inbound-frame timestamp.
+ */
+export const WATCHDOG_CHECK_INTERVAL_MS = 60_000;
+
+/**
+ * If no inbound Stream frame (KEEPALIVE / SYSTEM / message) arrives within
+ * this window while the socket still reports itself open, treat the
+ * connection as dead (half-open TCP after system sleep / proxy switch) and
+ * forcibly recycle it. The SDK's autoReconnect only reacts to a socket
+ * "close" (dingtalk-stream client.mjs), which half-open sockets never emit,
+ * so the client stays "connected" forever while frames stop flowing — we
+ * must break the connection ourselves.
+ */
+export const NO_FRAME_TIMEOUT_MS = 5 * 60_000;
+
 export function deriveConnectionState(input: ConnectionStateInput): ConnectionState {
   if (input.cleanedUp) return "disconnected";
   if (input.connected) return "connected";
@@ -84,6 +100,12 @@ export async function startMonitor(opts: {
   const errors: string[] = [];
   let observedRobotCode: string | undefined;
 
+  // Heartbeat watchdog state. lastDownstreamTs is refreshed whenever any
+  // inbound frame is observed; the timer trips if it goes stale while the
+  // socket still thinks it is connected (see NO_FRAME_TIMEOUT_MS).
+  let lastDownstreamTs = Date.now();
+  let watchdogTimer: ReturnType<typeof setInterval> | undefined;
+
   const restClient = getDingTalkClient(accountId, config);
   const dedup = new MessageDedup();
 
@@ -98,6 +120,18 @@ export async function startMonitor(opts: {
     subscriptions: [{ type: "CALLBACK", topic: TOPIC_ROBOT }],
     autoReconnect: true,
   } as DWClientOptions);
+
+  // Refresh the watchdog timestamp on every inbound frame. The SDK routes
+  // KEEPALIVE / SYSTEM / EVENT / CALLBACK inbound frames through
+  // DWClient.onDownStream (dingtalk-stream client.mjs), so hooking it here
+  // covers all of them without touching dedup / authorization logic. The
+  // original handler is preserved so the SDK still dispatches to our topic
+  // callback below.
+  const originalOnDownStream = stream.onDownStream.bind(stream);
+  stream.onDownStream = (data: string) => {
+    lastDownstreamTs = Date.now();
+    originalOnDownStream(data);
+  };
 
   const deps: EventHandlerDeps = {
     accountId,
@@ -158,6 +192,7 @@ export async function startMonitor(opts: {
           errors.length = 0;
           logger.info(`dingtalk[${accountId}]: Stream connected`);
         }
+        startWatchdog();
         return;
       } catch (err) {
         recordError(err);
@@ -168,10 +203,52 @@ export async function startMonitor(opts: {
     }
   };
 
+  const stopWatchdog = () => {
+    if (watchdogTimer !== undefined) {
+      clearInterval(watchdogTimer);
+      watchdogTimer = undefined;
+    }
+  };
+
+  // Start the heartbeat watchdog interval if it isn't running. Called on
+  // startup and again after every successful (re)connect so the watchdog
+  // keeps watching across recycle cycles. The SDK only notices a lost
+  // connection when the socket emits "close" (dingtalk-stream client.mjs) — a
+  // half-open TCP socket after system sleep / proxy switch never does, so
+  // autoReconnect stays silent. If the socket still reports itself connected
+  // but no frame has arrived for NO_FRAME_TIMEOUT_MS, the connection is dead.
+  const startWatchdog = () => {
+    if (watchdogTimer !== undefined || cleanedUp || abortSignal.aborted) return;
+    watchdogTimer = setInterval(() => {
+      if (cleanedUp) return;
+      const now = Date.now();
+      if (stream.connected && now - lastDownstreamTs > NO_FRAME_TIMEOUT_MS) {
+        recycle();
+      }
+    }, WATCHDOG_CHECK_INTERVAL_MS);
+  };
+
+  // Break the current connection and re-enter the connect loop. disconnect()
+  // sets DWClient.userDisconnect, which suppresses the SDK's own (half-open-
+  // blind) autoReconnect; the fresh connectLoop then clears it on the next
+  // _connect(). Status keeps flowing through deriveConnectionState the whole
+  // time, and startWatchdog() is re-armed by connectLoop on success.
+  const recycle = () => {
+    try {
+      stream.disconnect();
+    } catch (err) {
+      logger.error(`dingtalk[${accountId}]: failed to break stale Stream connection`, err);
+    }
+    const idleSec = Math.round((Date.now() - lastDownstreamTs) / 1000);
+    logger.warn(`dingtalk[${accountId}]: no frames for ${idleSec}s, reconnecting`);
+    void connectLoop();
+  };
+
   const cleanup = () => {
     if (cleanedUp) return;
     cleanedUp = true;
     abortSignal.removeEventListener("abort", handleAbort);
+    stopWatchdog();
     try {
       stream.disconnect();
     } catch (err) {
