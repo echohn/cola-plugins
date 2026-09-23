@@ -209,7 +209,7 @@ describe("richText message handling", () => {
     expect(parsed?.media).toEqual({
       kind: "image",
       downloadCode: "dc-only",
-      fileName: "dc-only",
+      fileName: undefined,
     });
   });
 
@@ -250,7 +250,7 @@ describe("extractMedia", () => {
       content: { downloadCode: "dc-img" },
     });
     expect(media?.kind).toBe("image");
-    expect(media?.fileName).toBe("dc-img");
+    expect(media?.fileName).toBeUndefined();
   });
 
   it("falls back to the top-level fileName / downloadCode when content lacks them", () => {
@@ -277,7 +277,7 @@ describe("extractMedia", () => {
         richText: [{ text: "hello" }, { type: "picture", downloadCode: "dc-pic" }],
       },
     });
-    expect(media).toEqual({ kind: "image", downloadCode: "dc-pic", fileName: "dc-pic" });
+    expect(media).toEqual({ kind: "image", downloadCode: "dc-pic", fileName: undefined });
   });
 
   it("returns undefined for a richText message without a picture downloadCode", () => {
@@ -315,11 +315,13 @@ describe("downloadRobotMessageMedia", () => {
     expect(info).toHaveBeenCalled();
   });
 
-  it("returns a default extension-based name when the message has no file name", async () => {
+  it("falls back to a hashed name (not the downloadCode) when the message has no file name", async () => {
     const client = { downloadMessageFile: vi.fn(async () => "/tmp/x") };
+    // A long base64-ish downloadCode that would exceed filesystem name limits.
+    const longCode = `mIofN681YE3f_+m+NntqpT_Xb989by3Wk+raappFh6IDZWpC7EkwrPh${"A".repeat(400)}`;
     const parsed = {
       robotCode: "robot-1",
-      media: { kind: "image", downloadCode: "dc" },
+      media: { kind: "image", downloadCode: longCode },
     } as never;
 
     await downloadRobotMessageMedia(client as never, parsed, {
@@ -327,9 +329,31 @@ describe("downloadRobotMessageMedia", () => {
       warn: vi.fn(),
     } as never);
 
-    expect(client.downloadMessageFile).toHaveBeenCalledWith("robot-1", "dc", "picture.jpg", {
-      maxBytes: MAX_MEDIA_DOWNLOAD_BYTES,
-    });
+    const mockCall = (client as { downloadMessageFile: ReturnType<typeof vi.fn> })
+      .downloadMessageFile.mock.calls[0] as unknown as [
+      string,
+      string,
+      string,
+      { maxBytes: number },
+    ];
+    expect(mockCall[0]).toBe("robot-1");
+    expect(mockCall[1]).toBe(longCode);
+    expect(mockCall[3].maxBytes).toBe(MAX_MEDIA_DOWNLOAD_BYTES);
+    const name = mockCall[2];
+    // The generated name must be short, deterministic, extension-bearing, and
+    // must NOT contain the raw downloadCode.
+    expect(name.length).toBeLessThanOrEqual(120);
+    expect(name).toMatch(/^[0-9a-f]{16}\.jpg$/);
+    expect(name).not.toContain(longCode);
+    // Deterministic: same code → same name.
+    await downloadRobotMessageMedia(client as never, parsed, {
+      info: vi.fn(),
+      warn: vi.fn(),
+    } as never);
+    expect(
+      (client as { downloadMessageFile: ReturnType<typeof vi.fn> }).downloadMessageFile.mock
+        .calls[1][2],
+    ).toBe(name);
   });
 
   it("returns undefined when downloadCode or robotCode is missing, without downloading", async () => {

@@ -1,4 +1,5 @@
 import type { PluginLogger } from "@marswave/cola-plugin-sdk";
+import { createHash } from "node:crypto";
 import type { DingTalkClient } from "../api/client.js";
 import type { ParsedRobotMessage } from "./message.js";
 
@@ -27,7 +28,7 @@ export async function downloadRobotMessageMedia(
     return undefined;
   }
 
-  const fallbackName = fileName ?? mediaDefaultExtension(parsed.media?.kind ?? "unknown");
+  const fallbackName = fileName ?? mediaFallbackName(downloadCode, parsed.media?.kind ?? "unknown");
   try {
     const path = await client.downloadMessageFile(robotCode, downloadCode, fallbackName, {
       maxBytes: MAX_MEDIA_DOWNLOAD_BYTES,
@@ -44,17 +45,33 @@ export async function downloadRobotMessageMedia(
   }
 }
 
-function mediaDefaultExtension(kind: string): string {
+/**
+ * Build a safe file name when the message carries no real `fileName`. The
+ * downloadCode is a long base64-ish token (image messages have no name), so
+ * reusing it verbatim would exceed common filesystem limits and throw
+ * ENAMETOOLONG. Instead derive a short deterministic name from a sha256 hash of
+ * the code plus an extension inferred from the media kind. The resulting name
+ * is short (16 hex chars + extension) and never contains the code itself.
+ */
+function mediaFallbackName(downloadCode: string, kind: string): string {
+  const hash = sha256Hex(downloadCode).slice(0, 16);
+  return `${hash}${mediaExtension(kind)}`;
+}
+
+/** sha256 of a string, hex-encoded. */
+function sha256Hex(input: string): string {
+  return createHash("sha256").update(input, "utf8").digest("hex");
+}
+
+function mediaExtension(kind: string): string {
   switch (kind) {
     case "image":
-      return "picture.jpg";
+      return ".jpg";
     case "audio":
-      return "voice.amr";
+      return ".amr";
     case "video":
-      return "video.mp4";
-    case "file":
-      return "file";
+      return ".mp4";
     default:
-      return "message";
+      return "";
   }
 }

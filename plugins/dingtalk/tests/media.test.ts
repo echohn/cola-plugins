@@ -95,6 +95,18 @@ describe("sanitizeFileName", () => {
     expect(sanitizeFileName("")).toBe("message");
     expect(sanitizeFileName("   ")).toBe("message");
   });
+
+  it("truncates an over-long basename while keeping the extension", () => {
+    const long = `a${"x".repeat(300)}.png`;
+    const safe = sanitizeFileName(long);
+    expect(safe.length).toBeLessThanOrEqual(200);
+    expect(safe.endsWith(".png")).toBe(true);
+    expect(safe.length).toBe(120 + 4); // 120-char stem + ".png"
+  });
+
+  it("leaves a normal-length name untouched", () => {
+    expect(sanitizeFileName("report.pdf")).toBe("report.pdf");
+  });
 });
 
 describe("DingTalkClient.uploadMedia", () => {
@@ -245,5 +257,36 @@ describe("DingTalkClient.resolveMessageDownload / downloadMessageFile", () => {
     await expect(
       client.downloadMessageFile("robot-1", "code-1", "big.bin", { maxBytes: 10 }),
     ).rejects.toThrow(/limit/);
+  });
+
+  it("survives an over-long downloadCode: writes a short derived filename", async () => {
+    const downloadUrl = "https://tmp.example/pic";
+    const body = await fs.readFile(await writeTmp("blob", "img-bytes"));
+    const longCode = `mIofN681YE3f_+m+NntqpT_Xb989by3Wk+raappFh6IDZWpC7EkwrPh${"A".repeat(500)}`;
+    const fetchImpl = vi.fn(async (input: string) => {
+      if (input.endsWith("/v1.0/oauth2/accessToken")) return tokenResponse();
+      if (input.endsWith("/v1.0/robot/messageFiles/download")) return jsonResponse({ downloadUrl });
+      if (input === downloadUrl)
+        return {
+          ok: true,
+          status: 200,
+          headers: { get: (n: string) => (n === "content-length" ? String(body.length) : null) },
+          arrayBuffer: async () => body.buffer,
+        } as unknown as Response;
+      throw new Error(`unexpected url ${input}`);
+    });
+    const client = new DingTalkClient(
+      new AccessTokenManager("app", "secret", fetchImpl),
+      fetchImpl,
+    );
+
+    // Pass the raw long code as the fileName to prove sanitizeFileName clamps it.
+    const out = await client.downloadMessageFile("robot-1", longCode, longCode);
+
+    const base = path.basename(out);
+    expect(base.length).toBeLessThanOrEqual(120);
+    expect(base).not.toContain(longCode);
+    expect(await fs.readFile(out, "utf8")).toBe("img-bytes");
+    await fs.rm(path.dirname(out), { recursive: true, force: true });
   });
 });

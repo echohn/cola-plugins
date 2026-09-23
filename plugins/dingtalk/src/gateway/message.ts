@@ -119,10 +119,11 @@ export function extractMedia(
   };
 
   const downloadCode = content.downloadCode ?? (payload as { downloadCode?: string }).downloadCode;
-  const fileName =
-    content.fileName ??
-    (payload as { fileName?: string }).fileName ??
-    downloadCode?.replace(/^\*+/, "");
+  // Only use a real fileName when the message reports one. The downloadCode is
+  // a long base64-ish token that must NOT be reused as a file name (it exceeds
+  // common filesystem name limits and hashed fallbacks are applied at download
+  // time instead when the name is missing).
+  const fileName = content.fileName ?? (payload as { fileName?: string }).fileName;
 
   const kind = mediaKindForMsgType(payload.msgtype);
   return { kind, downloadCode, fileName: normalizeFileName(fileName) };
@@ -260,8 +261,10 @@ function extractRichTextMedia(
   if (!pictureNode) return undefined;
   const downloadCode = pictureNode.downloadCode;
   if (!downloadCode) return undefined;
-  const fileName = pictureNode.fileName ?? downloadCode.replace(/^\*+/, "");
-  return { kind: "image", downloadCode, fileName: normalizeFileName(fileName) };
+  // Prefer a real name; when the picture carries none, leave it undefined so the
+  // download path builds a safe hashed name instead of reusing the downloadCode.
+  const fileName = normalizeFileName(pictureNode.fileName);
+  return { kind: "image", downloadCode, fileName };
 }
 
 /**

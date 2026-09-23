@@ -365,9 +365,10 @@ type CachedEntry = {
 
 /**
  * Sanitize an inbound file name for safe use as a temp download path: strip
- * path separators, shell metacharacters, and ASCII control characters. Keeps
- * the extension so the agent and the user can identify the file type at a
- * glance.
+ * path separators, shell metacharacters, and ASCII control characters, then
+ * truncate the basename so an over-long name never throws ENAMETOOLONG on
+ * write. Keeps the extension so the agent and the user can identify the file
+ * type at a glance.
  */
 export function sanitizeFileName(name: string): string {
   let base = name.replace(/[\\/:*?"<>|]/g, "_");
@@ -380,7 +381,25 @@ export function sanitizeFileName(name: string): string {
       return code >= 0x20 && code !== 0x7f;
     })
     .join("");
-  return base.trim() || "message";
+  return truncateBasename(base.trim() || "message");
+}
+
+/** Max length for the basename portion (before the last extension segment). */
+const MAX_BASENAME_LENGTH = 120;
+
+/**
+ * Truncate a file name's basename to `MAX_BASENAME_LENGTH` characters, keeping
+ * the trailing extension segment intact. Applied after sanitization so no
+ * caller can slip an over-long name (from any source) past the write — a bare
+ * download token would otherwise exceed common filesystem name limits and
+ * throw ENAMETOOLONG (mac APFS/HFS allow up to 255 UTF-8 bytes).
+ */
+function truncateBasename(name: string): string {
+  const dot = name.lastIndexOf(".");
+  const ext = dot > 0 ? name.slice(dot) : "";
+  const stem = dot > 0 ? name.slice(0, dot) : name;
+  if (stem.length <= MAX_BASENAME_LENGTH) return name;
+  return `${stem.slice(0, MAX_BASENAME_LENGTH)}${ext}`;
 }
 
 const clientCache = new Map<string, CachedEntry>();
