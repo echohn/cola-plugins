@@ -1,7 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import { resolvePluginText } from "@marswave/cola-plugin-sdk";
 import { deriveConnectionState, type ConnectionStateInput } from "../src/gateway/monitor.js";
-import { handleRobotMessage, type EventHandlerDeps } from "../src/gateway/event-handler.js";
+import {
+  handleRobotMessage,
+  type EventHandlerDeps,
+  MEDIA_DOWNLOADED_NOTE,
+  MEDIA_DOWNLOAD_FAILED_WARN,
+} from "../src/gateway/event-handler.js";
 import { MessageDedup } from "../src/gateway/dedup.js";
 import feishuLikeIndex from "../src/index.js";
 
@@ -337,5 +342,161 @@ describe("event handler delivery payloads", () => {
     expect(message.msgKey).toBe("sampleText");
     const parsed = JSON.parse(message.msgParam) as { content: string };
     expect(parsed.content).toContain("Group chat is not enabled");
+  });
+
+  // A message with a downloadCode and no robotCode can't be downloaded.
+  const mediaNoRobotPayload = JSON.stringify({
+    conversationId: "cid-dm-media",
+    conversationType: "1",
+    msgId: "msg-dm-media-1",
+    msgtype: "file",
+    senderStaffId: "staff-1",
+    senderId: "sender-1",
+    content: { downloadCode: "dc-1", fileName: "report.pdf" },
+  });
+
+  it("appends the downloaded media note when the file download succeeds", async () => {
+    const downloadMessageFile = Object.assign(
+      vi.fn(async () => "/tmp/cola-dingtalk-test/report.pdf"),
+    );
+    const { deps, delivered } = makeDeps({
+      groupEnabled: true,
+      logger: { info: () => {}, warn: () => {}, error: () => {} },
+      client: { downloadMessageFile } as unknown as EventHandlerDeps["client"],
+    });
+    await handleRobotMessage(
+      deps,
+      JSON.stringify({
+        conversationId: "cid-dm-media",
+        conversationType: "1",
+        msgId: "msg-dm-media-2",
+        msgtype: "file",
+        senderStaffId: "staff-1",
+        senderId: "sender-1",
+        robotCode: "ding-test-robot",
+        content: { downloadCode: "dc-1", fileName: "report.pdf" },
+      }),
+    );
+
+    expect(delivered).toHaveLength(1);
+    const payload = delivered[0] as { message: string; attachments?: string[] };
+    // text summary + the media-downloaded note
+    expect(payload.message).toContain("[文件: report.pdf]");
+    expect(payload.message).toContain(MEDIA_DOWNLOADED_NOTE);
+    expect(payload.attachments).toEqual(["/tmp/cola-dingtalk-test/report.pdf"]);
+  });
+
+  it("appends the hard failure warning and sends no attachment when the media can't be downloaded", async () => {
+    let warnCalls = 0;
+    const warn = () => {
+      warnCalls++;
+    };
+    // No robotCode → download is skipped → failure warning.
+    const { deps, delivered } = makeDeps({
+      groupEnabled: true,
+      logger: { info: () => {}, warn, error: () => {} },
+      client: {} as EventHandlerDeps["client"],
+    });
+    await handleRobotMessage(deps, mediaNoRobotPayload);
+
+    expect(delivered).toHaveLength(1);
+    const payload = delivered[0] as { message: string; attachments?: string[] };
+    expect(payload.message).toContain(MEDIA_DOWNLOAD_FAILED_WARN);
+    expect(payload.attachments ?? []).toHaveLength(0);
+    // warn should have been called at least once for the failure path
+    expect(warnCalls).toBeGreaterThan(0);
+  });
+
+  it("appends the hard failure warning when the download itself throws", async () => {
+    let warnCalls = 0;
+    const warn = () => {
+      warnCalls++;
+    };
+    const downloadMessageFile = Object.assign(
+      vi.fn(async () => {
+        throw new Error("boom");
+      }),
+    );
+    const { deps, delivered } = makeDeps({
+      groupEnabled: true,
+      logger: { info: () => {}, warn, error: () => {} },
+      client: { downloadMessageFile } as unknown as EventHandlerDeps["client"],
+    });
+    await handleRobotMessage(
+      deps,
+      JSON.stringify({
+        conversationId: "cid-dm-media",
+        conversationType: "1",
+        msgId: "msg-dm-media-3",
+        msgtype: "file",
+        senderStaffId: "staff-1",
+        senderId: "sender-1",
+        robotCode: "ding-test-robot",
+        content: { downloadCode: "dc-throw", fileName: "x.pdf" },
+      }),
+    );
+
+    expect(delivered).toHaveLength(1);
+    const payload = delivered[0] as { message: string; attachments?: string[] };
+    expect(payload.message).toContain(MEDIA_DOWNLOAD_FAILED_WARN);
+    expect(payload.attachments ?? []).toHaveLength(0);
+    expect(warnCalls).toBeGreaterThan(0);
+  });
+
+  it("appends the media note to richText [图文] summaries (coexists with the marker)", async () => {
+    const downloadMessageFile = Object.assign(
+      vi.fn(async () => "/tmp/cola-dingtalk-test/photo.png"),
+    );
+    const { deps, delivered } = makeDeps({
+      groupEnabled: true,
+      logger: { info: () => {}, warn: () => {}, error: () => {} },
+      client: { downloadMessageFile } as unknown as EventHandlerDeps["client"],
+    });
+    await handleRobotMessage(
+      deps,
+      JSON.stringify({
+        conversationId: "cid-dm-rt",
+        conversationType: "1",
+        msgId: "msg-rt-1",
+        msgtype: "richText",
+        senderStaffId: "staff-1",
+        senderId: "sender-1",
+        robotCode: "ding-test-robot",
+        content: {
+          richText: [
+            { text: "查一下" },
+            { type: "picture", downloadCode: "dc-pic", fileName: "photo.png" },
+          ],
+        },
+      }),
+    );
+
+    expect(delivered).toHaveLength(1);
+    const payload = delivered[0] as { message: string };
+    // [图文] summary + text + downloaded note all present
+    expect(payload.message).toContain("[图文]");
+    expect(payload.message).toContain("查一下");
+    expect(payload.message).toContain(MEDIA_DOWNLOADED_NOTE);
+  });
+
+  it("adds no media note when the message has no media", async () => {
+    const { deps, delivered } = makeDeps({ groupEnabled: true });
+    await handleRobotMessage(
+      deps,
+      JSON.stringify({
+        conversationId: "cid-dm-media",
+        conversationType: "1",
+        msgId: "msg-dm-media-4",
+        msgtype: "text",
+        text: { content: "just words" },
+        senderStaffId: "staff-1",
+        senderId: "sender-1",
+        robotCode: "ding-test-robot",
+      }),
+    );
+    expect(delivered).toHaveLength(1);
+    const payload = delivered[0] as { message: string; attachments?: string[] };
+    expect(payload.message).not.toContain("System note");
+    expect(payload.attachments ?? []).toHaveLength(0);
   });
 });

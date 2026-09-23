@@ -79,7 +79,11 @@ export function parseRobotMessage(
 
   const isGroup = conversationType === "2";
   const content =
-    payload.msgtype === "text" ? (payload.text?.content ?? "") : summarizeMediaMessage(payload);
+    payload.msgtype === "text"
+      ? (payload.text?.content ?? "")
+      : payload.msgtype === "richText"
+        ? summarizeRichText(payload)
+        : summarizeMediaMessage(payload);
   const text = isGroup ? stripMentionPrefix(content) : content;
 
   return {
@@ -99,14 +103,15 @@ export function parseRobotMessage(
  * Pull the downloadCode + file name (and a normalized media kind) out of a
  * non-text inbound payload. DingTalk nests these under `content` for several
  * types (file, picture, audio, video) and also at the top level for some.
- * Rich-text (`richText`) messages never carry a single downloadCode (they can
- * embed multiple pictures), so they yield `undefined` here and stay as a text
- * summary.
+ * Rich-text (`richText`) messages embed pictures inside `content.richText`;
+ * the first `picture` node's downloadCode is extracted so the gateway can
+ * download the attached image like any other media message.
  */
 export function extractMedia(
   payload: DingTalkRobotPayload,
 ): ParsedRobotMessage["media"] | undefined {
-  if (payload.msgtype === "text" || payload.msgtype === "richText") return undefined;
+  if (payload.msgtype === "text") return undefined;
+  if (payload.msgtype === "richText") return extractRichTextMedia(payload);
 
   const content = (payload.content ?? {}) as {
     downloadCode?: string;
@@ -170,10 +175,8 @@ export function summarizeMediaMessage(payload: DingTalkRobotPayload): string {
       return "[语音]";
     case "video":
       return "[视频]";
-    case "richText": {
-      const inline = extractRichText(payload);
-      return inline ? `[图文] ${inline}` : "[图文]";
-    }
+    case "richText":
+      return summarizeRichText(payload);
     case "file": {
       const fileName =
         (typeof payload.fileName === "string" && payload.fileName) ||
@@ -189,18 +192,76 @@ export function summarizeMediaMessage(payload: DingTalkRobotPayload): string {
   }
 }
 
-function extractRichText(payload: DingTalkRobotPayload): string | undefined {
-  const content = payload.content as
-    | { richArray?: Array<{ type?: string; text?: string }> }
+/**
+ * Read the `content.richText` array as a list of rich-text nodes. DingTalk
+ * nests rich-text payloads under `content.richText` (an array whose elements
+ * are either a bare `{ text }` node or a `{ type, downloadCode }` picture
+ * node). The legacy `content.richArray` shape is also accepted for backwards
+ * compatibility.
+ */
+export function richTextContent(payload: DingTalkRobotPayload): RichTextNode[] {
+  const content = (payload.content ?? {}) as
+    | { richText?: unknown; richArray?: unknown }
     | undefined;
-  const richArray = content?.richArray;
-  if (!Array.isArray(richArray)) return undefined;
-  const text = richArray
-    .filter((item) => item?.type === "text" && typeof item.text === "string")
-    .map((item) => item.text as string)
+  const raw = content?.richText ?? content?.richArray;
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((n): n is RichTextNode => !!n && typeof n === "object");
+}
+
+/** A single element of a DingTalk `content.richText` array. */
+export type RichTextNode = {
+  type?: string;
+  text?: string;
+  downloadCode?: string;
+  fileName?: string;
+  [key: string]: unknown;
+};
+
+/**
+ * The user's free text carried by a rich-text message, with every inline
+ * `text` node joined in order. Returns undefined when the message is not a
+ * richText payload or carries no such nodes.
+ */
+export function extractRichText(payload: DingTalkRobotPayload): string | undefined {
+  if (payload.msgtype !== "richText") return undefined;
+  const text = richTextContent(payload)
+    .map((n) => n.text)
+    .filter((t): t is string => typeof t === "string")
     .join("")
     .trim();
   return text || undefined;
+}
+
+/**
+ * Build the text summary for a richText message. When the message embeds one
+ * or more pictures the `[图文]` marker is prepended to the inline text (a
+ * picture message with a caption becomes `[图文] the caption`; a bare picture
+ * message becomes just `[图文]`). A picture-less richText message is treated
+ * as plain text and returned as-is, with no marker.
+ */
+export function summarizeRichText(payload: DingTalkRobotPayload): string {
+  const inline = extractRichText(payload);
+  const hasPicture = richTextContent(payload).some((n) => n?.type === "picture");
+  if (!hasPicture) return (inline ?? "").trim();
+  return inline ? `[图文] ${inline}` : "[图文]";
+}
+
+/**
+ * Pull a media object out of a rich-text message. Rich-text can embed multiple
+ * pictures (each a `picture` node in `content.richText`); the gateway's
+ * download path consumes a single downloadCode at a time, so the first picture
+ * node is used and later ones are dropped (a known limitation, consistent with
+ * how the existing picture/file/etc. handlers behave).
+ */
+function extractRichTextMedia(
+  payload: DingTalkRobotPayload,
+): ParsedRobotMessage["media"] | undefined {
+  const pictureNode = richTextContent(payload).find((n) => n?.type === "picture");
+  if (!pictureNode) return undefined;
+  const downloadCode = pictureNode.downloadCode;
+  if (!downloadCode) return undefined;
+  const fileName = pictureNode.fileName ?? downloadCode.replace(/^\*+/, "");
+  return { kind: "image", downloadCode, fileName: normalizeFileName(fileName) };
 }
 
 /**

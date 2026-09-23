@@ -4,7 +4,9 @@ import {
   parseRobotMessage,
   stripMentionPrefix,
   summarizeMediaMessage,
+  summarizeRichText,
   extractMedia,
+  richTextContent,
 } from "../src/gateway/message.js";
 import { MessageDedup } from "../src/gateway/dedup.js";
 import {
@@ -123,24 +125,113 @@ describe("summarizeMediaMessage", () => {
     ).toBe("[文件]");
   });
 
-  it("extracts inline text from richText messages", () => {
+  it("extracts inline text from picture-richText messages via the media summary marker", () => {
     expect(
       summarizeMediaMessage({
         ...base,
         msgtype: "richText",
         content: {
-          richArray: [
-            { type: "text", text: "rich " },
-            { type: "text", text: "body" },
+          richText: [
+            { text: "rich " },
+            { text: "body" },
+            { type: "picture", downloadCode: "dc-pic" },
           ],
         },
       }),
     ).toBe("[图文] rich body");
-    expect(summarizeMediaMessage({ ...base, msgtype: "richText" })).toBe("[图文]");
+    expect(summarizeMediaMessage({ ...base, msgtype: "richText" })).toBe(""); // no picture, no text
   });
 
   it("falls back to the raw msgtype for unknown types", () => {
     expect(summarizeMediaMessage({ ...base, msgtype: "hologram" })).toBe("[hologram]");
+  });
+});
+
+describe("richText message handling", () => {
+  const base = {
+    conversationType: "2",
+    conversationId: "c",
+    msgId: "m",
+    senderStaffId: "staff-1",
+    senderId: "sender-1",
+    senderNick: "Tester",
+    robotCode: "robot-1",
+  };
+
+  it("a) picture+text richText extracts the downloadCode and joins the user text", () => {
+    const parsed = parseRobotMessage(
+      JSON.stringify({
+        ...base,
+        msgtype: "richText",
+        content: {
+          richText: [
+            { text: "查一下" },
+            { text: "这个图" },
+            { type: "picture", downloadCode: "dc-img", fileName: "photo.png" },
+          ],
+        },
+      }),
+      logger,
+    );
+    expect(parsed?.text).toBe("[图文] 查一下这个图"); // summarizeRichText
+    expect(parsed?.media).toEqual({
+      kind: "image",
+      downloadCode: "dc-img",
+      fileName: "photo.png",
+    });
+  });
+
+  it("b) pure-text richText has no media and no [图文] marker", () => {
+    const parsed = parseRobotMessage(
+      JSON.stringify({
+        ...base,
+        msgtype: "richText",
+        content: { richText: [{ text: "纯文字富文本" }] },
+      }),
+      logger,
+    );
+    expect(parsed?.text).toBe("纯文字富文本");
+    expect(parsed?.media).toBeUndefined();
+  });
+
+  it("c) picture-only richText keeps [图文] and still carries the downloadCode", () => {
+    const parsed = parseRobotMessage(
+      JSON.stringify({
+        ...base,
+        msgtype: "richText",
+        content: {
+          richText: [{ type: "picture", downloadCode: "dc-only" }],
+        },
+      }),
+      logger,
+    );
+    expect(parsed?.text).toBe("[图文]");
+    expect(parsed?.media).toEqual({
+      kind: "image",
+      downloadCode: "dc-only",
+      fileName: "dc-only",
+    });
+  });
+
+  it("summarizeRichText falls back to plain text when there is no picture node", () => {
+    expect(
+      summarizeRichText({
+        ...base,
+        msgtype: "richText",
+        content: { richText: [{ text: "  " }, { text: "cap" }] },
+      }),
+    ).toBe("cap");
+  });
+
+  it("richTextContent reads the picture node used by extractMedia", () => {
+    expect(
+      richTextContent({
+        msgtype: "richText",
+        content: {
+          richText: [{ text: "x" }, { type: "picture", downloadCode: "d" }],
+        },
+      }),
+    ).toEqual([{ text: "x" }, { type: "picture", downloadCode: "d" }]);
   });
 });
 
@@ -175,8 +266,27 @@ describe("extractMedia", () => {
     expect(extractMedia({ msgtype: "video", content: { downloadCode: "v" } })?.kind).toBe("video");
   });
 
-  it("returns undefined for text and richText messages", () => {
+  it("returns undefined for text messages", () => {
     expect(extractMedia({ msgtype: "text", text: { content: "hi" } })).toBeUndefined();
+  });
+
+  it("extracts the first picture's downloadCode from a richText message", () => {
+    const media = extractMedia({
+      msgtype: "richText",
+      content: {
+        richText: [{ text: "hello" }, { type: "picture", downloadCode: "dc-pic" }],
+      },
+    });
+    expect(media).toEqual({ kind: "image", downloadCode: "dc-pic", fileName: "dc-pic" });
+  });
+
+  it("returns undefined for a richText message without a picture downloadCode", () => {
+    expect(
+      extractMedia({
+        msgtype: "richText",
+        content: { richText: [{ text: "only text" }] },
+      }),
+    ).toBeUndefined();
     expect(extractMedia({ msgtype: "richText" })).toBeUndefined();
   });
 });
