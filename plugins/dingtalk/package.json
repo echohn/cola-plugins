@@ -33,7 +33,7 @@
     "channel": {
       "label": "DingTalk",
       "description": "DingTalk messaging via official enterprise bot (Stream mode)",
-      "iconUrl": "https://www.dingtalk.com/favicon.ico",
+      "iconUrl": "https://raw.githubusercontent.com/marswaveai/cola-plugins/main/plugins/dingtalk/assets/icon.png",
       "aliases": [
         "dingtalk"
       ],
