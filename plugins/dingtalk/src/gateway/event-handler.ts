@@ -63,7 +63,11 @@ function buildNonOwnerTag(parsed: ParsedRobotMessage): string {
 /** Tag a group message's text before it reaches the agent. Direct chats are left untouched. */
 export function annotateGroupMessage(parsed: ParsedRobotMessage, ownerStaffId?: string): string {
   if (!parsed.isGroup) return parsed.text;
-  if (ownerStaffId && parsed.senderId === ownerStaffId) {
+  // Group payloads carry senderId as a LWCP union id, which never matches the
+  // configured staffId ownerStaffId — the owner must be matched via
+  // senderStaffId (present for published robots), falling back to senderId.
+  const resolvedSenderId = parsed.senderStaffId ?? parsed.senderId;
+  if (ownerStaffId && resolvedSenderId === ownerStaffId) {
     return `${OWNER_TAG_PREFIX}\n${parsed.text}`;
   }
   return `${buildNonOwnerTag(parsed)}\n${parsed.text}`;

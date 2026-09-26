@@ -218,8 +218,10 @@ describe("event handler delivery payloads", () => {
     expect(payload.message).toContain("run the report");
   });
 
-  it("tags a group message as owner when senderId matches ownerStaffId", async () => {
-    const { deps, delivered } = makeDeps({ groupEnabled: true, ownerStaffId: "sender-1" });
+  it("tags a group message as owner when senderStaffId matches ownerStaffId", async () => {
+    // Owner is configured by staffId; group payloads carry senderId as a LWCP
+    // union id, so matching must prefer senderStaffId.
+    const { deps, delivered } = makeDeps({ groupEnabled: true, ownerStaffId: "staff-1" });
     await handleRobotMessage(deps, groupPayload);
 
     expect(delivered).toHaveLength(1);
