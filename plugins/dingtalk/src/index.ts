@@ -61,14 +61,20 @@ export default defineChannel<DingTalkGatewayState>({
   },
 
   unauthorizedHint(target) {
+    // The default dead-end reply leaves the owner no way to authorize this
+    // chat: the ID needed for `cola channel allow[-group]` only shows up in
+    // host logs. Always include the target ID and the matching command so the
+    // rejection doubles as an actionable authorization hint.
     return target.kind === "group"
       ? m(
           "auth.group",
-          "I am the owner's work assistant and am unable to process your request for now. Your message won't be seen by the owner; if you have something urgent, please contact the owner directly.",
+          "I am the owner's work assistant and am unable to process your request for now. This group is not authorized yet (Group ID: {{groupId}}). The owner can run `cola channel allow-group dingtalk {{groupId}}` on the desktop, or send this ID to the assistant via direct message.",
+          { groupId: target.id },
         )
       : m(
           "auth.user",
-          "I am the owner's work assistant and am unable to process your request for now. Your message won't be seen by the owner; if you have something urgent, please contact the owner directly.",
+          "I am the owner's work assistant and am unable to process your request for now. You are not authorized yet (Your ID: {{userId}}). The owner can run `cola channel allow dingtalk {{userId}}` on the desktop, or send this ID to the assistant via an authorized channel.",
+          { userId: target.id },
         );
   },
 
